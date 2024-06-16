@@ -81,6 +81,25 @@ func newUpstreamConfig(
 	return uc, nil
 }
 
+// newGFWListUpstreamConfig returns the upstream configuration based on the
+// provided gfwList upstreams.  If no upstreams are specified, defaultUpstreams
+// are used.
+func newGFWListUpstreamConfig(
+	upstreams []string,
+	opts *upstream.Options,
+) (uc *proxy.UpstreamConfig, err error) {
+	uc, err = proxy.ParseUpstreamsConfig(upstreams, opts)
+	if err != nil {
+		return uc, fmt.Errorf("parsing gfwList upstreams: %w", err)
+	}
+
+	if len(uc.Upstreams) == 0 {
+		return nil, fmt.Errorf("no gfwList upstreams specified")
+	}
+
+	return uc, nil
+}
+
 // newPrivateConfig creates an upstream configuration for resolving PTR records
 // for local addresses.  The configuration is built either from the provided
 // addresses or from the system resolvers.  unwanted filters the resulting

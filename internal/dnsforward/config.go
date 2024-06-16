@@ -83,6 +83,18 @@ type Config struct {
 	// DNS servers.
 	UpstreamDNSFileName string `yaml:"upstream_dns_file"`
 
+	// Enable GFWList
+	GFWListEnabled bool `yaml:"gfwlist_enabled"`
+
+	// GFWListFetchURL is the URL to fetch GFWList.
+	GFWListFetchURL string `yaml:"gfwlist_fetch_url"`
+
+	// GFWListUpdateInterval is the interval for updating GFWList.
+	GFWListUpdateInterval int `yaml:"gfwlist_update_interval"`
+
+	// GFWListDNS is the list of DNS servers for GFWList.
+	GFWListUpstreamDNS []string `yaml:"gfwlist_upstream_dns"`
+
 	// BootstrapDNS is the list of bootstrap DNS servers for DoH and DoT
 	// resolvers (plain DNS only).
 	BootstrapDNS []string `yaml:"bootstrap_dns"`
@@ -244,6 +256,10 @@ type ServerConfig struct {
 
 	// UpstreamConfig is the general configuration of upstream DNS servers.
 	UpstreamConfig *proxy.UpstreamConfig
+
+	// GFWListUpstreamConfig is the configuration of upstream DNS servers for
+	// GFWList.
+	GFWListUpstreamConfig *proxy.UpstreamConfig
 
 	// PrivateRDNSUpstreamConfig is the configuration of upstream DNS servers
 	// for private reverse DNS.
@@ -492,6 +508,15 @@ func (conf *ServerConfig) loadUpstreams() (upstreams []string, err error) {
 	log.Debug("dnsforward: got %d upstreams in %q", len(upstreams), conf.UpstreamDNSFileName)
 
 	return stringutil.FilterOut(upstreams, IsCommentOrEmpty), nil
+}
+
+// loadGFWListUpstreams parses GFWList upstream DNS servers from the configuration.
+func (conf *ServerConfig) loadGFWListUpstreams() (upstreams []string, err error) {
+	if len(conf.GFWListUpstreamDNS) == 0 {
+		return nil, nil
+	}
+
+	return stringutil.FilterOut(conf.GFWListUpstreamDNS, IsCommentOrEmpty), nil
 }
 
 // collectListenAddr adds addrPort to addrs.  It also adds its port to

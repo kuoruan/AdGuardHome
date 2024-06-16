@@ -20,6 +20,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/client"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/AdGuardHome/internal/gfwlist"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/rdns"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
@@ -174,6 +175,13 @@ type Server struct {
 	// internalProxy resolves internal requests from the application itself.  It
 	// isn't started and so no listen ports are required.
 	internalProxy *proxy.Proxy
+
+	// gfwList is the GFWList for filtering requests.
+	gfwList *gfwlist.GFWList
+
+	// gfwListProxy is the DNS proxy for forwarding client's DNS requests to
+	// GFWList upstreams.
+	gfwListProxy *proxy.Proxy
 
 	// isRunning is true if the DNS server is running.
 	isRunning bool
@@ -336,6 +344,12 @@ func (s *Server) Resolve(ctx context.Context, net, host string) (addr []netip.Ad
 	s.serverLock.RLock()
 	defer s.serverLock.RUnlock()
 
+	if blocked := s.gfwList.IsBlockedByGFW(host); blocked {
+		if s.gfwListProxy != nil {
+			return s.gfwListProxy.LookupNetIP(ctx, net, host)
+		}
+	}
+
 	return s.internalProxy.LookupNetIP(ctx, net, host)
 }
 
@@ -394,6 +408,11 @@ func (s *Server) Exchange(ip netip.Addr) (host string, ttl time.Duration, err er
 	} else {
 		errMsg = "resolving an address: %w"
 	}
+
+	if err = s.gfwListProxy.Resolve(dctx); err == nil {
+		return hostFromPTR(dctx.Res)
+	}
+
 	if err = s.internalProxy.Resolve(dctx); err != nil {
 		return "", 0, fmt.Errorf(errMsg, err)
 	}
@@ -529,7 +548,7 @@ func (s *Server) prepareUpstreamSettings(boot upstream.Resolver) (err error) {
 		return fmt.Errorf("loading upstreams: %w", err)
 	}
 
-	uc, err := newUpstreamConfig(upstreams, defaultDNS, &upstream.Options{
+	opts := &upstream.Options{
 		Bootstrap:    boot,
 		Timeout:      s.conf.UpstreamTimeout,
 		HTTPVersions: UpstreamHTTPVersions(s.conf.UseHTTP3Upstreams),
@@ -543,12 +562,27 @@ func (s *Server) prepareUpstreamSettings(boot upstream.Resolver) (err error) {
 		// TODO(a.garipov): Investigate if that's true.
 		RootCAs:      s.conf.TLSv12Roots,
 		CipherSuites: s.conf.TLSCiphers,
-	})
+	}
+
+	uc, err := newUpstreamConfig(upstreams, defaultDNS, opts)
 	if err != nil {
 		return fmt.Errorf("preparing upstream config: %w", err)
 	}
 
 	s.conf.UpstreamConfig = uc
+
+	if !s.conf.GFWListEnabled {
+		return nil
+	}
+
+	gfwListUpstreams, err := s.conf.loadGFWListUpstreams()
+
+	gfwListUc, err := newGFWListUpstreamConfig(gfwListUpstreams, opts)
+	if err != nil {
+		return fmt.Errorf("preparing gfwlist upstream config: %w", err)
+	}
+
+	s.conf.GFWListUpstreamConfig = gfwListUc
 
 	return nil
 }
@@ -645,6 +679,20 @@ func (s *Server) prepareInternalDNS() (err error) {
 	err = s.prepareInternalProxy()
 	if err != nil {
 		return fmt.Errorf("preparing internal proxy: %w", err)
+	}
+
+	if !s.conf.GFWListEnabled {
+		return nil
+	}
+
+	err = s.prepareGFWList()
+	if err != nil {
+		return fmt.Errorf("preparing gfwlist: %w", err)
+	}
+
+	err = s.prepareGFWListProxy()
+	if err != nil {
+		return fmt.Errorf("preparing gfwlist proxy: %w", err)
 	}
 
 	return nil
@@ -748,6 +796,51 @@ func (s *Server) prepareInternalProxy() (err error) {
 	s.internalProxy, err = proxy.New(conf)
 
 	return err
+}
+
+func (s *Server) prepareGFWListProxy() (err error) {
+	srvConf := s.conf
+	conf := &proxy.Config{
+		CacheEnabled:              true,
+		CacheSizeBytes:            4096,
+		PrivateRDNSUpstreamConfig: srvConf.PrivateRDNSUpstreamConfig,
+		UpstreamConfig:            srvConf.GFWListUpstreamConfig,
+		MaxGoroutines:             srvConf.MaxGoroutines,
+		UseDNS64:                  srvConf.UseDNS64,
+		DNS64Prefs:                srvConf.DNS64Prefixes,
+		UsePrivateRDNS:            srvConf.UsePrivateRDNS,
+		PrivateSubnets:            s.privateNets,
+		MessageConstructor:        s,
+	}
+
+	err = setProxyUpstreamMode(conf, srvConf.UpstreamMode, srvConf.FastestTimeout.Duration)
+	if err != nil {
+		return fmt.Errorf("invalid upstream mode: %w", err)
+	}
+
+	s.gfwListProxy, err = proxy.New(conf)
+
+	return err
+}
+
+func (s *Server) prepareGFWList() (err error) {
+	srvConf := s.conf
+
+	opts := &upstream.Options{
+		Bootstrap: s.bootstrap,
+		Timeout:   defaultLocalTimeout,
+		// TODO(e.burkov): Should we verify server's certificates?
+		PreferIPv6: s.conf.BootstrapPreferIPv6,
+	}
+
+	gfwList, err := gfwlist.NewGFWList(srvConf.GFWListFetchURL, srvConf.GFWListUpdateInterval, opts)
+	if err != nil {
+		return fmt.Errorf("creating gfwlist: %w", err)
+	}
+
+	s.gfwList = gfwList
+
+	return nil
 }
 
 // Stop stops the DNS server.
